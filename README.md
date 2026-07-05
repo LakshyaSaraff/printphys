@@ -72,7 +72,7 @@ printphys part.stl --material pla --infill 20 --weighed-mass 38.4g
 `printphys` rescales all outputs to match the measured mass and reports how far off
 the estimate was. If you do this, consider submitting the datapoint via the
 [calibration issue template](.github/ISSUE_TEMPLATE/calibration_datapoint.md) — it
-helps everyone.
+helps everyone. See [`validation/`](validation/) for real print-and-weigh case studies.
 
 ## More outputs
 
