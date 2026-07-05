@@ -1,0 +1,11 @@
+name: tpu
+display_name: TPU 95A (generic)
+density_g_cm3: 1.21
+cost_per_kg_usd: 30
+elastic_modulus_gpa: 0.026
+glass_transition_c: -30
+sources:
+  - "NinjaTek / generic TPU 95A TDS"
+notes: >
+  Flexible; elastic modulus is orders of magnitude below rigid filaments.
+  Rigid-body inertia values remain valid.

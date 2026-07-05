@@ -1,0 +1,36 @@
+# Template for a user-specified material.
+# Copyright (c) 2026 Lakshya Saraf — see LICENSE.
+#
+# Copy this file anywhere, fill in your filament's data, and pass the path
+# instead of a bundled material name:
+#
+#   printphys part.stl --material path/to/my_filament.yaml --infill 20
+#
+# or in Python:
+#
+#   from printphys import analyze
+#   analyze("part.stl", material="path/to/my_filament.yaml")
+#
+# Only density_g_cm3 is required; everything else improves the report but can
+# be omitted. Get density from the filament manufacturer's TDS, or measure it:
+# weigh a known length of filament (density = mass / (length x cross-section)).
+
+name: my_filament
+display_name: My Filament (Brand X)
+
+# REQUIRED. Solid material density in g/cm^3 (PLA ~1.24, PETG ~1.27, ABS ~1.04).
+density_g_cm3: 1.24
+
+# Optional: used in reports and cost estimates.
+cost_per_kg_usd: 25
+
+# Optional: stiffness and thermal data.
+elastic_modulus_gpa: 3.0
+glass_transition_c: 60
+
+# Cite where the numbers came from (TDS link, your own measurement, etc.).
+sources:
+  - "Brand X TDS rev 3"
+notes: >
+  Any caveats worth remembering: moisture state of the filament, whether
+  specimens were annealed, etc.

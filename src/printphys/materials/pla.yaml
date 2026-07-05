@@ -1,0 +1,11 @@
+name: pla
+display_name: PLA (generic)
+density_g_cm3: 1.24
+cost_per_kg_usd: 20
+elastic_modulus_gpa: 3.5
+glass_transition_c: 60
+sources:
+  - "NatureWorks Ingeo 4043D TDS"
+  - "Prusament PLA TDS (printed specimens)"
+notes: >
+  Generic PLA values; specific brands vary +-5% on density.

@@ -1,0 +1,10 @@
+name: abs
+display_name: ABS (generic)
+density_g_cm3: 1.04
+cost_per_kg_usd: 20
+elastic_modulus_gpa: 2.1
+glass_transition_c: 105
+sources:
+  - "Generic ABS filament TDS values"
+notes: >
+  Generic ABS values; assumes a reasonably enclosed printer.

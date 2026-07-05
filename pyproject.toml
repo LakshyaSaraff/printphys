@@ -1,0 +1,53 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "printphys"
+version = "0.1.0"
+description = "Accurate URDF physics (mass, COM, inertia) for 3D-printed parts, aware of infill, walls, and material."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.9"
+authors = [{ name = "Lakshya Saraf", email = "lakshyasaraff@gmail.com" }]
+maintainers = [{ name = "Lakshya Saraf", email = "lakshyasaraff@gmail.com" }]
+keywords = ["urdf", "3d-printing", "robotics", "inertia", "simulation", "slicer"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+dependencies = [
+    "numpy>=1.22",
+    "scipy>=1.8",
+    "trimesh>=3.20",
+    "PyYAML>=6.0",
+    "defusedxml>=0.7",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "ruff>=0.4"]
+docs = ["mkdocs-material>=9"]
+
+[project.scripts]
+printphys = "printphys.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/LakshyaSaraff/printphys"
+Documentation = "https://lakshyasaraff.github.io/printphys"
+Issues = "https://github.com/LakshyaSaraff/printphys/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/printphys"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
