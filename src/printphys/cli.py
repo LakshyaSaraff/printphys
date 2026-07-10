@@ -41,7 +41,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--gcode",
         metavar="FILE",
-        help="analyze a sliced G-code file instead of the mesh (high accuracy)",
+        help="analyze a sliced G-code file instead of the mesh (ground truth "
+        "for your print; .gcode or Bambu/Orca .gcode.3mf)",
+    )
+    parser.add_argument(
+        "--slice",
+        action="store_true",
+        help="slice the mesh with your installed slicer CLI first and analyze "
+        "the resulting G-code (ground-truth accuracy without slicing by hand; "
+        "auto-detects PrusaSlicer, SuperSlicer, Bambu Studio, or OrcaSlicer)",
+    )
+    parser.add_argument(
+        "--slicer-exe",
+        metavar="EXE",
+        help="slicer executable for --slice (default: auto-detect from "
+        "PRINTPHYS_SLICER, PATH, then common install locations)",
     )
 
     mat = parser.add_argument_group("material and print settings")
@@ -131,6 +145,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.mesh and not args.gcode:
         parser.error("provide a mesh file or --gcode FILE")
+    if args.slice and not args.mesh:
+        parser.error("--slice requires a mesh file")
     if args.patch_urdf and not args.link:
         parser.error("--patch-urdf requires --link")
 
@@ -144,18 +160,27 @@ def main(argv: list[str] | None = None) -> int:
             top_layers=args.top_layers,
             bottom_layers=args.bottom_layers,
         )
+        gcode_path = args.gcode
+        mesh_path = args.mesh
+        if args.slice:
+            from printphys.backends.gcode import slice_mesh
+
+            gcode_path = slice_mesh(args.mesh, settings, executable=args.slicer_exe)
+            mesh_path = None
+            if not args.quiet:
+                print(f"sliced to {gcode_path}", file=sys.stderr)
         result = analyze(
-            mesh_path=args.mesh,
+            mesh_path=mesh_path,
             settings=settings,
             material=args.material,
-            gcode_path=args.gcode,
+            gcode_path=gcode_path,
             units=args.units,
             pitch=args.pitch,
             pattern_aware=not args.no_pattern_aware,
             weighed_mass_kg=args.weighed_mass,
             filament_diameter_mm=args.filament_diameter,
         )
-    except (ValueError, FileNotFoundError) as exc:
+    except (ValueError, FileNotFoundError, RuntimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 

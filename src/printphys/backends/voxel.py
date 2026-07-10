@@ -3,13 +3,21 @@
 
 """Voxel/shell backend: print-aware mass properties without running a slicer.
 
-The mesh is voxelized on a regular grid. Each occupied voxel is classified:
+The mesh is voxelized on a regular grid. Each occupied voxel receives a
+*fractional* solid-shell content (0..1 of its material):
 
-- wall: within ``wall_count * line_width`` of the lateral surface (per-layer
-  2D distance transform, matching how slicers offset perimeters),
-- skin: within ``top_layers`` / ``bottom_layers`` of an up/down-facing surface
-  (per-column run length, matching solid top/bottom layers),
-- interior: everything else, printed at ``infill% * density``.
+- wall: material within ``wall_count * line_width`` of the lateral surface
+  (per-layer 2D distance transform, matching how slicers offset perimeters),
+- skin: material within ``top_layers`` / ``bottom_layers`` of an up/down-facing
+  surface (per-column run length, matching solid top/bottom layers),
+- interior: the remaining material, printed at ``infill% * density``.
+
+The shell is computed at sub-voxel resolution: each voxel knows the depth band
+its material occupies below the part surface, and only the part of that band
+inside the wall/skin thickness counts as solid. This keeps shell mass accurate
+even when the voxel pitch is *larger* than the wall thickness — critical for
+thin-walled parts, whose printed mass is dominated by perimeters and skins
+rather than infill.
 
 For gyroid/grid/lines patterns the interior density can follow the actual
 pattern geometry instead of a uniform average; total mass is identical either
@@ -36,6 +44,14 @@ from printphys.settings import GEOMETRY_AWARE_PATTERNS, PrintSettings
 
 DEFAULT_MAX_VOXELS_PER_AXIS = 192
 
+# trimesh's "subdivide" voxelizer splits every triangle until edges are shorter
+# than the pitch, so a mesh with large flat triangles voxelized at a fine pitch
+# can transiently explode to tens of millions of faces and exhaust memory.
+# Budget for the estimated post-subdivision face count; the pitch is coarsened
+# to stay within it. Thanks to the sub-voxel shell model, a coarser pitch no
+# longer degrades wall/skin mass.
+SUBDIVIDE_FACE_BUDGET = 2_000_000
+
 
 def _choose_pitch(mesh: trimesh.Trimesh, settings: PrintSettings, max_per_axis: int) -> float:
     """Default pitch: layer height, coarsened if the part is large."""
@@ -43,37 +59,97 @@ def _choose_pitch(mesh: trimesh.Trimesh, settings: PrintSettings, max_per_axis: 
     return max(settings.layer_height, max_extent / max_per_axis)
 
 
-def _classify_solid(occ: np.ndarray, pitch: float, settings: PrintSettings) -> np.ndarray:
-    """Boolean mask of voxels printed at full density (walls + top/bottom skin)."""
-    solid = np.zeros_like(occ)
+def _memory_safe_pitch(mesh: trimesh.Trimesh, pitch: float) -> float:
+    """Coarsen the pitch if voxelization would exhaust memory.
 
-    # Lateral walls: per z-slice, distance (in-plane) to the nearest empty cell.
+    Estimates the number of faces trimesh's subdivide voxelizer will create
+    (each face splits until its longest edge is below the pitch, i.e. roughly
+    ``(edge / pitch)**2`` pieces) and coarsens the pitch so the total stays
+    within ``SUBDIVIDE_FACE_BUDGET``.
+    """
+    tri = mesh.triangles
+    edge = np.linalg.norm(np.diff(tri[:, [0, 1, 2, 0]], axis=1), axis=2)
+    approx_faces = float(np.sum(np.ceil(edge.max(axis=1) / pitch) ** 2))
+    if approx_faces <= SUBDIVIDE_FACE_BUDGET:
+        return pitch
+    safe = pitch * float(np.sqrt(approx_faces / SUBDIVIDE_FACE_BUDGET))
+    warnings.warn(
+        f"voxel pitch coarsened from {pitch:.3g} mm to {safe:.3g} mm to keep "
+        "voxelization within memory limits (mesh has large faces); mass is "
+        "unaffected, inertia resolution is slightly reduced",
+        stacklevel=2,
+    )
+    return safe
+
+
+def _depth_band(index: np.ndarray, at_surface: np.ndarray, pitch: float) -> tuple:
+    """Depth interval (mm below the part surface) spanned by a voxel's material.
+
+    ``index`` is the 1-based distance from the surface in voxels (EDT ring or
+    skin run length). Surface-straddling voxels hold material in [0, pitch/2]
+    (the boundary passes through their center — the same assumption behind the
+    0.5 coverage weighting); deeper voxels are shifted by that half-voxel.
+    """
+    lo = np.where(at_surface & (index <= 1), 0.0, (index - 1.5) * pitch)
+    hi = np.where(at_surface & (index <= 1), 0.5 * pitch, (index - 0.5) * pitch)
+    return np.clip(lo, 0.0, None), np.clip(hi, 0.0, None)
+
+
+def _band_overlap(lo: np.ndarray, hi: np.ndarray, thickness: float) -> np.ndarray:
+    """Length of [lo, hi] that falls inside the solid band [0, thickness]."""
+    return np.clip(np.minimum(hi, thickness) - lo, 0.0, None)
+
+
+def _solid_fraction(
+    occ: np.ndarray, surface: np.ndarray, pitch: float, settings: PrintSettings
+) -> np.ndarray:
+    """Fraction (0..1) of each occupied voxel's *material* that is solid shell.
+
+    Walls and skins are resolved at sub-voxel precision: each voxel contributes
+    the exact overlap of its depth band with the wall/skin thickness, so shell
+    mass is (to first order) independent of the voxel pitch. A voxel pitch
+    coarser than the wall no longer erases the wall.
+    """
+    nx, ny, nz = occ.shape
+    surf = surface & occ
+    # Material thickness represented by a voxel: half for surface voxels
+    # (they straddle the boundary; matches the 0.5 coverage weighting).
+    material = np.where(surf, 0.5 * pitch, pitch)
+    solid_mm = np.zeros(occ.shape, dtype=float)
+
+    # Lateral walls: per z-slice, in-plane EDT to the nearest empty cell.
     if settings.wall_thickness > 0:
-        n_wall = max(1, int(round(settings.wall_thickness / pitch)))
-        for z in range(occ.shape[2]):
+        for z in range(nz):
             sl = occ[:, :, z]
             if not sl.any():
                 continue
             dist = ndimage.distance_transform_edt(sl)
-            solid[:, :, z] |= sl & (dist <= n_wall)
+            lo, hi = _depth_band(dist, surf[:, :, z], pitch)
+            solid_mm[:, :, z] += np.where(sl, _band_overlap(lo, hi, settings.wall_thickness), 0.0)
 
     # Top/bottom skins: per xy-column, run length of occupied voxels up/down
     # to the nearest air voxel (grid boundary counts as air).
-    nx, ny, nz = occ.shape
     if settings.top_thickness > 0:
-        n_top = max(1, int(round(settings.top_thickness / pitch)))
         run = np.zeros((nx, ny), dtype=np.int32)
         for z in range(nz - 1, -1, -1):
             run = np.where(occ[:, :, z], run + 1, 0)
-            solid[:, :, z] |= occ[:, :, z] & (run <= n_top)
+            lo, hi = _depth_band(run, surf[:, :, z], pitch)
+            solid_mm[:, :, z] += np.where(
+                occ[:, :, z], _band_overlap(lo, hi, settings.top_thickness), 0.0
+            )
     if settings.bottom_thickness > 0:
-        n_bot = max(1, int(round(settings.bottom_thickness / pitch)))
         run = np.zeros((nx, ny), dtype=np.int32)
         for z in range(nz):
             run = np.where(occ[:, :, z], run + 1, 0)
-            solid[:, :, z] |= occ[:, :, z] & (run <= n_bot)
+            lo, hi = _depth_band(run, surf[:, :, z], pitch)
+            solid_mm[:, :, z] += np.where(
+                occ[:, :, z], _band_overlap(lo, hi, settings.bottom_thickness), 0.0
+            )
 
-    return solid
+    with np.errstate(invalid="ignore"):
+        frac = np.clip(solid_mm / material, 0.0, 1.0)
+    frac[~occ] = 0.0
+    return frac
 
 
 def _pattern_metric(points: np.ndarray, pattern: str, cell: float) -> np.ndarray:
@@ -193,6 +269,7 @@ def analyze_voxel(
 
     if pitch is None:
         pitch = _choose_pitch(mesh, settings, max_voxels_per_axis)
+    pitch = _memory_safe_pitch(mesh, pitch)
 
     surface_vg = mesh.voxelized(pitch)
     surface = np.asarray(surface_vg.matrix, dtype=bool).copy()
@@ -207,17 +284,23 @@ def analyze_voxel(
     # inside the part: weight them at 0.5 coverage to cancel the dilation bias.
     coverage = np.where(surface & occ, 0.5, 1.0)
 
-    solid = _classify_solid(occ, pitch, settings)
-    interior = occ & ~solid
+    solid_frac = _solid_fraction(occ, surface, pitch, settings)
+    interior = occ & (solid_frac < 1.0)
 
-    # Relative density per occupied voxel (1.0 = fully dense plastic).
-    rel = np.zeros(occ.shape, dtype=float)
-    rel[solid] = 1.0
+    # Relative density per occupied voxel (1.0 = fully dense plastic): the
+    # solid-shell fraction at full density plus the remaining material at the
+    # interior (infill) density.
+    rel = solid_frac.copy()
     interior_idx = np.argwhere(interior)
     interior_pts = vg.indices_to_points(interior_idx) if len(interior_idx) else np.zeros((0, 3))
-    rel[tuple(interior_idx.T)] = _interior_density_field(
-        interior_pts, settings, pitch, pattern_aware, weights=coverage[tuple(interior_idx.T)]
-    )
+    if len(interior_idx):
+        idx = tuple(interior_idx.T)
+        interior_material = 1.0 - solid_frac[idx]
+        density = _interior_density_field(
+            interior_pts, settings, pitch, pattern_aware,
+            weights=coverage[idx] * interior_material,
+        )
+        rel[idx] += interior_material * density
 
     # Remove residual discretization bias: scale coverage-weighted voxel
     # volume to the exact mesh volume (only meaningful for watertight meshes).
@@ -245,7 +328,8 @@ def analyze_voxel(
         "pitch_mm": float(pitch),
         "grid_shape": list(occ.shape),
         "num_voxels_occupied": int(occ.sum()),
-        "num_voxels_solid_shell": int(solid.sum()),
+        # Equivalent fully-solid voxel count of the shell (walls + skins).
+        "num_voxels_solid_shell": int(round(float((solid_frac[tuple(occ_idx.T)] * cov_occ).sum()))),
         "num_voxels_interior": int(interior.sum()),
         "watertight": bool(watertight),
         "pattern_aware": bool(pattern_aware and settings.pattern in GEOMETRY_AWARE_PATTERNS),

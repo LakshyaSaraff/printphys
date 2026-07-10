@@ -5,21 +5,32 @@
 [![CI](https://github.com/LakshyaSaraff/printphys/actions/workflows/ci.yml/badge.svg)](https://github.com/LakshyaSaraff/printphys/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-CAD tools compute inertia assuming your part is a solid block of plastic. A 3D-printed
-part is not: it is dense walls and skins around sparse infill. `printphys` takes your
-mesh plus your **actual print settings** (material, infill %, pattern, wall count,
-layer height) and produces mass, center of mass, and the full inertia tensor — as a
-ready-to-paste URDF `<inertial>` block (SDF and MJCF too).
+CAD assumes solid plastic. Real prints are walls, skins, and sparse infill.
+`printphys` takes your mesh and print settings and returns mass, center of mass,
+and inertia — as a paste-ready URDF `<inertial>` block (SDF and MJCF too).
 
-## Quickstart
+## Install
 
 ```bash
 pip install git+https://github.com/LakshyaSaraff/printphys.git
-
-printphys part.stl --material pla --infill 20 --pattern gyroid --walls 3
 ```
 
-Output:
+## Usage
+
+Pick the path that matches your setup:
+
+```bash
+# 1. No slicer — fast estimate from the mesh (default)
+printphys part.stl --material pla --infill 20 --walls 3
+
+# 2. You already slice in Bambu/Orca/Prusa — analyze that G-code
+printphys --gcode part.gcode.3mf --material pla
+
+# 3. Slicer CLI installed — slice + analyze in one step
+printphys part.stl --slice --material pla --infill 20 --walls 3
+```
+
+Output (stdout):
 
 ```xml
 <inertial>
@@ -29,98 +40,73 @@ Output:
 </inertial>
 ```
 
-Or from Python:
+Python:
 
 ```python
 from printphys import analyze, PrintSettings
 
-result = analyze(
-    "part.stl",
-    settings=PrintSettings(infill_percent=20, pattern="gyroid", wall_count=3),
-    material="pla",
-)
-print(result.props.mass, result.props.com, result.props.inertia)
+result = analyze("part.stl", settings=PrintSettings(infill_percent=20, wall_count=3), material="pla")
 print(result.to_urdf())
 ```
 
-## How it works
+Other formats: `--format json|sdf|mjcf`. Patch a URDF in place:
+`--patch-urdf robot.urdf --link forearm`.
 
-Two backends, one interface:
+## Backends
 
-- **Voxel backend (default, zero extra tools).** The mesh is voxelized; voxels within
-  the wall thickness of the surface and within the top/bottom skin layers get full
-  material density, the interior gets `infill% x density` (optionally modulated by the
-  actual infill pattern geometry for gyroid/grid/lines). Mass, COM, and inertia are
-  integrated over the voxel field.
-- **G-code backend (high accuracy).** Point `printphys` at a G-code file you already
-  sliced (`--gcode part.gcode`) and every extrusion move is integrated as a mass
-  element. This is ground truth for your actual print — walls, skins, infill, supports
-  and all.
+| | Voxel (default) | G-code (`--gcode` / `--slice`) |
+| --- | --- | --- |
+| Needs | mesh + settings | sliced toolpaths |
+| Mass accuracy | good; ~5–15% low on complex parts | matches slicer (validated vs Bambu Studio) |
+| Frame | mesh — ready for URDF | printer bed |
+| Best for | quick estimates, setting sweeps | final numbers |
 
-At 100% infill the voxel backend converges to the exact solid-body inertia, which is
-anchored by the test suite. See [docs/accuracy.md](docs/accuracy.md) for methodology
-and error characteristics.
+- **Voxel** — voxelizes the mesh; walls/skins at sub-voxel precision, infill by pattern.
+- **G-code** — integrates every extrusion move; captures seams, gap fill, supports.
 
-## Validate against reality
+For URDF links, prefer voxel (mesh frame) and calibrate mass with `--weighed-mass 38.4g`,
+or use G-code mass to rescale. Details: [docs/accuracy.md](docs/accuracy.md).
 
-Weigh your printed part and pass it in:
+## Slicer CLI (optional)
+
+`printphys` does not bundle a slicer. Use `--slice` only if you want one-command
+G-code accuracy and are fine installing a slicer yourself:
+
+- [PrusaSlicer](https://www.prusa3d.com/prusaslicer/) (recommended)
+- [Bambu Studio](https://bambulab.com/download/studio)
+- [OrcaSlicer](https://github.com/SoftFever/OrcaSlicer/releases)
+
+Auto-detect: `PRINTPHYS_SLICER` → `PATH` → common install folders. Or point
+directly:
+
+```bash
+printphys part.stl --slice --slicer-exe "D:\Bambu Studio\bambu-studio.exe" ...
+```
+
+Already sliced in a GUI? Skip the CLI — export G-code and use `--gcode` instead.
+
+## Calibrate
+
+Weigh the printed part:
 
 ```bash
 printphys part.stl --material pla --infill 20 --weighed-mass 38.4g
 ```
 
-`printphys` rescales all outputs to match the measured mass and reports how far off
-the estimate was. If you do this, consider submitting the datapoint via the
-[calibration issue template](.github/ISSUE_TEMPLATE/calibration_datapoint.md) — it
-helps everyone. See [`validation/`](validation/) for real print-and-weigh case studies.
-
-## More outputs
-
-```bash
-printphys part.stl --material petg --infill 30 --format sdf     # Gazebo SDF
-printphys part.stl --material petg --infill 30 --format mjcf    # MuJoCo MJCF
-printphys part.stl --material petg --infill 30 --format json    # full report
-printphys part.stl --material pla  --infill 20 \
-    --patch-urdf robot.urdf --link forearm                      # patch in place
-```
-
-The JSON report also includes the **effective density** (printed mass / solid CAD
-volume) so you can plug it back into SolidWorks/Fusion/Onshape exporters.
+Rescales output to the measured mass and reports the estimate error. Case studies:
+[`validation/`](validation/).
 
 ## Materials
 
-Materials live as plain YAML files in
-[`src/printphys/materials/`](src/printphys/materials/). PLA, PETG, ABS, ASA, and TPU
-ship out of the box.
-
-You can also use your own material without touching the package: copy
-[`examples/custom_material.yaml`](examples/custom_material.yaml), fill in your
-filament's data, and pass the file path anywhere a material name is accepted:
-
-```bash
-printphys part.stl --material my_filament.yaml --infill 20
-```
-
-To share a material with everyone, add the YAML via a PR — see
-[CONTRIBUTING.md](CONTRIBUTING.md).
-
-## Roadmap
-
-- **v0.1** — voxel backend, PLA/PETG/ABS materials, URDF export, CLI
-- **v0.2** — G-code backend, pattern-aware density fields, SDF/MJCF export
-- **v0.3** — collision-mesh simplification
-- **Later** — web UI (drag-and-drop)
+PLA, PETG, ABS, ASA, and TPU ship in [`src/printphys/materials/`](src/printphys/materials/).
+Custom filament: copy [`examples/custom_material.yaml`](examples/custom_material.yaml)
+and pass `--material my_filament.yaml`.
 
 ## Contributing
 
-Issues and PRs welcome — the lowest-barrier contribution is a material YAML or a
-calibration datapoint (weigh a part, report the error). See
-[CONTRIBUTING.md](CONTRIBUTING.md).
+Issues and PRs welcome — material YAMLs and weigh-and-compare datapoints are
+especially useful. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## License and credit
+## License
 
-Copyright (c) 2026 **Lakshya Saraf** — author and developer of printphys.
-
-Licensed under the [MIT License](LICENSE): free to use, modify, distribute, and
-build upon, including commercially. The only condition is that the copyright
-notice and license text are retained in copies.
+MIT — Copyright (c) 2026 Lakshya Saraf. See [LICENSE](LICENSE).
